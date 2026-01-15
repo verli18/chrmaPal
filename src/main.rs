@@ -1,162 +1,59 @@
-use egui_macroquad::egui::{Color32, Slider};
 use macroquad::prelude::*;
 
-mod color_fun;
+mod app;
+mod color;
 mod curves;
-use curves::SaturationCurve;
+mod palette;
+mod rendering;
+mod ui;
+mod viewport;
 
-struct Palette {
-    num_colors: usize,
-    color1: Color32,
-    color2: Color32,
-    blending_mode: usize,
-    hue_shift: f32,
-    sat_curve: SaturationCurve,
-    chroma_boost: f32,
-}
+use app::App;
+use rendering::{draw_checker_background, draw_palette};
+use ui::swatch_editor::SwatchEditorState;
+use ui::palette_editor::PaletteEditorState;
+use ui::{draw_palette_editor, draw_swatch_editor, draw_top_panel};
 
-impl Palette {
-    fn new() -> Self {
-        Self {
-            num_colors: 8,
-            color1: Color32::from_rgb(30, 60, 120),
-            color2: Color32::from_rgb(255, 220, 100),
-            blending_mode: 2,
-            hue_shift: 0.0,
-            sat_curve: SaturationCurve::Midtones,
-            chroma_boost: 1.0,
-        }
-    }
-}
+// =============================================================================
+// Main application
+// =============================================================================
 
-struct swatches {
-    colors: Vec<Color32>
-}
-
-impl swatches {
-    fn new() -> Self {
-        Self {
-            colors: Vec::new()
-        }
-    }
-}
-
-#[macroquad::main("egui with macroquad")]
+#[macroquad::main("Palette Helper")]
 async fn main() {
-    let pal_range = (screen_width()/8.0, screen_width()/8.0 * 7.0);
-    let pal_vertical_range = (screen_height()/4.0, screen_height()/4.0 * 3.0);
-    
-    let mut palette = Palette::new();
-    
+    let mut app = App::new();
+    let mut swatch_editor_state = SwatchEditorState::default();
+    let mut palette_editor_state = PaletteEditorState::default();
+
+    // Sync editor state with initial swatch
+    swatch_editor_state.sync_with_swatch(&app);
+
     loop {
-        clear_background(Color::new(79.0/255.0, 92.0/255.0, 98.0/255.0, 1.0));
+        // Draw background with parallax
+        draw_checker_background(&app.viewport);
 
+        // Draw all palette swatches (auto-aligned)
+        draw_palette(
+            &app.viewport,
+            &app.generated_colors,
+            app.current_swatch_index,
+        );
+
+        // Track if egui wants input
+        let mut egui_wants_pointer = false;
+
+        // Draw egui UI
         egui_macroquad::ui(|egui_ctx| {
-            egui_macroquad::egui::Window::new("Palette Generator")
-                .show(egui_ctx, |ui| {
-                    ui.add(Slider::new(&mut palette.num_colors, 2..=16).text("Number of colors"));
-                    
-                    ui.horizontal(|ui| {
-                        ui.label("Dark color:");
-                        ui.color_edit_button_srgba(&mut palette.color1);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Light color:");
-                        ui.color_edit_button_srgba(&mut palette.color2);
-                    });
+            egui_wants_pointer = egui_ctx.wants_pointer_input();
 
-                    ui.separator();
-                    ui.label("Blending Mode");
-                    egui_macroquad::egui::ComboBox::from_label("Mode")
-                        .selected_text(match palette.blending_mode {
-                            0 => "RGB (basic)",
-                            1 => "OkLab (perceptual)",
-                            2 => "OkLCh (recommended)",
-                            _ => "Unknown"
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut palette.blending_mode, 0, "RGB (basic)");
-                            ui.selectable_value(&mut palette.blending_mode, 1, "OkLab (perceptual)");
-                            ui.selectable_value(&mut palette.blending_mode, 2, "OkLCh (recommended)");
-                        });
-
-                    ui.separator();
-                    ui.label("Hue Rotation");
-                    ui.add(Slider::new(&mut palette.hue_shift, -180.0..=180.0)
-                        .text("degrees")
-                        .suffix("°"));
-                    ui.label("<- cold | warm ->");
-                    
-                    ui.separator();
-                    ui.label("Chroma / Saturation");
-                    let sat_curves = SaturationCurve::all();
-                    egui_macroquad::egui::ComboBox::from_label("Curve shape")
-                        .selected_text(palette.sat_curve.name())
-                        .show_ui(ui, |ui| {
-                            for curve in sat_curves.iter() {
-                                ui.selectable_value(&mut palette.sat_curve, *curve, curve.name());
-                            }
-                        });
-                    ui.add(Slider::new(&mut palette.chroma_boost, 0.0..=2.0)
-                        .text("Chroma boost"));
-                });
+            // Draw all UI windows
+            draw_top_panel(egui_ctx, &mut app);
+            draw_swatch_editor(egui_ctx, &mut app, &mut swatch_editor_state);
+            draw_palette_editor(egui_ctx, &mut app, &mut palette_editor_state);
         });
 
-        // Draw palette
-        let rectangle_length = (pal_range.1 - pal_range.0) / palette.num_colors as f32;
+        // Handle viewport input (only if egui doesn't want it)
+        app.viewport.handle_input(egui_wants_pointer);
 
-        for i in 0..palette.num_colors {
-            let t = if palette.num_colors > 1 { i as f32 / (palette.num_colors - 1) as f32 } else { 0.5 };
-
-            let rect_col = match palette.blending_mode {
-                0 => color_fun::lerp_color(palette.color1, palette.color2, t),
-                1 => color_fun::lerp_color_oklab(palette.color1, palette.color2, t),
-                2 => color_fun::generate_ramp_color_oklch(
-                    palette.color1,
-                    palette.color2,
-                    t,
-                    palette.hue_shift,
-                    palette.sat_curve,
-                    palette.chroma_boost
-                ),
-                _ => color_fun::lerp_color(palette.color1, palette.color2, t),
-
-            
-            };
-            
-            let macroquad_color = Color::new(
-                rect_col.r() as f32 / 255.0,
-                rect_col.g() as f32 / 255.0,
-                rect_col.b() as f32 / 255.0,
-                1.0,
-            );
-            draw_rectangle(
-                pal_range.0 + i as f32 * rectangle_length,
-                pal_vertical_range.0,
-                rectangle_length,
-                pal_vertical_range.1 - pal_vertical_range.0,
-                macroquad_color,
-            );
-
-            if (rect_col.r() as u32 + rect_col.g() as u32 + rect_col.b() as u32) < 382 {
-                draw_text(
-                    &format!("#{:02X}{:02X}{:02X}", rect_col.r(), rect_col.g(), rect_col.b()),
-                    pal_range.0 + i as f32 * rectangle_length + 8.0,
-                    pal_vertical_range.0 + 24.0,
-                    16.0,
-                    WHITE,
-                );
-            } else {
-                draw_text(
-                    &format!("#{:02X}{:02X}{:02X}", rect_col.r(), rect_col.g(), rect_col.b()),
-                    pal_range.0 + i as f32 * rectangle_length + 8.0,
-                    pal_vertical_range.0 + 24.0,
-                    16.0,
-                    BLACK,
-                );
-            }
-        }
-        
         egui_macroquad::draw();
         next_frame().await;
     }

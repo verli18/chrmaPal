@@ -1,232 +1,197 @@
-// ============================================================================
-// Saturation Curves
-// Maps luminosity (0.0 to 1.0) to saturation multiplier
-// These curves control how saturation changes across the light-dark range
-// ============================================================================
-
-/// Curve types for saturation mapping
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum SaturationCurve {
-    /// No saturation change
-    Flat,
-    /// Linear increase from dark to light
-    LinearUp,
-    /// Linear decrease from dark to light  
-    LinearDown,
-    /// More saturation at extremes (dark and light), less in midtones
-    Extremes,
-    /// More saturation in midtones, less at extremes
-    Midtones,
-    /// Classic "dark more saturated" look
-    DarkSaturated,
-    /// Classic "light more saturated" look
-    LightSaturated,
+/// A curve maps a normalized input `t` in [0.0, 1.0] to an output value.
+/// This is the core abstraction for all interpolation in the palette system.
+/// 
+/// By making this a public trait, any interpolation logic (color blending,
+/// parameter tweening, etc.) can be generic over the curve type.
+pub trait Curve {
+    fn sample(&self, t: f32) -> f32;
 }
 
-impl SaturationCurve {
-    /// Get the saturation to ADD for a given luminosity
-    /// - luminosity: 0.0 (black) to 1.0 (white)
-    /// - strength: how much saturation to add at peak (0.0 = none, 1.0 = full)
-    /// Returns: saturation amount to ADD (0.0 to ~0.15 in OkLCh chroma units)
-    pub fn evaluate(&self, luminosity: f32, strength: f32) -> f32 {
-        // Get curve shape value (0.0 to 1.0)
-        let curve_value = match self {
-            SaturationCurve::Flat => 0.5, // Constant mid-level
-            
-            SaturationCurve::LinearUp => {
-                // 0 at dark, 1 at light
-                luminosity
-            }
-            
-            SaturationCurve::LinearDown => {
-                // 1 at dark, 0 at light
-                1.0 - luminosity
-            }
-            
-            SaturationCurve::Extremes => {
-                // U-shaped curve: high at 0 and 1, low at 0.5
-                let centered = luminosity - 0.5;
-                (centered.abs() * 2.0).powf(1.5)
-            }
-            
-            SaturationCurve::Midtones => {
-                // Inverted U-shaped curve: low at 0 and 1, high at 0.5
-                let centered = luminosity - 0.5;
-                1.0 - (centered.abs() * 2.0).powf(1.5)
-            }
-            
-            SaturationCurve::DarkSaturated => {
-                // More effect in shadows, smooth falloff
-                (1.0 - luminosity).powf(0.7)
-            }
-            
-            SaturationCurve::LightSaturated => {
-                // More effect in highlights, smooth falloff
-                luminosity.powf(0.7)
-            }
-        };
-        
-        // Return saturation (chroma) amount to ADD
-        // Max chroma in OkLCh is around 0.4, so 0.15 is a reasonable max boost
-        curve_value * strength * 0.15
+/// The simplest curve: output equals input (optionally scaled by a factor).
+/// With factor=1.0, this is pure linear interpolation.
+#[derive(Clone, Copy, Debug)]
+pub struct Linear {
+    pub factor: f32,
+}
+
+impl Default for Linear {
+    fn default() -> Self {
+        Self { factor: 1.0 }
     }
-    
-    /// Get display name for UI
-    pub fn name(&self) -> &'static str {
-        match self {
-            SaturationCurve::Flat => "Flat (no change)",
-            SaturationCurve::LinearUp => "Linear + (light more sat)",
-            SaturationCurve::LinearDown => "Linear - (dark more sat)",
-            SaturationCurve::Extremes => "Extremes (U-curve)",
-            SaturationCurve::Midtones => "Midtones (reverse U-curve)",
-            SaturationCurve::DarkSaturated => "Dark saturated",
-            SaturationCurve::LightSaturated => "Light saturated",
+}
+
+impl Curve for Linear {
+    fn sample(&self, t: f32) -> f32 {
+        t * self.factor
+    }
+}
+
+/// Ease-in curve: starts slow, accelerates toward the end.
+/// Higher exponent = more dramatic easing.
+#[derive(Clone, Copy, Debug)]
+pub struct EaseIn {
+    pub exponent: f32,
+}
+
+impl Default for EaseIn {
+    fn default() -> Self {
+        Self { exponent: 2.0 }
+    }
+}
+
+impl Curve for EaseIn {
+    fn sample(&self, t: f32) -> f32 {
+        t.powf(self.exponent)
+    }
+}
+
+/// Ease-out curve: starts fast, decelerates toward the end.
+/// This is mathematically the "reflection" of EaseIn.
+#[derive(Clone, Copy, Debug)]
+pub struct EaseOut {
+    pub exponent: f32,
+}
+
+impl Default for EaseOut {
+    fn default() -> Self {
+        Self { exponent: 2.0 }
+    }
+}
+
+impl Curve for EaseOut {
+    fn sample(&self, t: f32) -> f32 {
+        // Flip input, apply ease-in, flip output
+        1.0 - (1.0 - t).powf(self.exponent)
+    }
+}
+
+/// Ease-in-out curve: slow at both ends, fast in the middle.
+/// Creates a smooth S-curve transition.
+#[derive(Clone, Copy, Debug)]
+pub struct EaseInOut {
+    pub exponent: f32,
+}
+
+impl Default for EaseInOut {
+    fn default() -> Self {
+        Self { exponent: 2.0 }
+    }
+}
+
+impl Curve for EaseInOut {
+    fn sample(&self, t: f32) -> f32 {
+        if t < 0.5 {
+            // First half: scaled ease-in
+            0.5 * (2.0 * t).powf(self.exponent)
+        } else {
+            // Second half: scaled ease-out (mirrored)
+            1.0 - 0.5 * (2.0 * (1.0 - t)).powf(self.exponent)
         }
     }
-    
-    /// Get all curve types for iteration
-    pub fn all() -> &'static [SaturationCurve] {
-        &[
-            SaturationCurve::Flat,
-            SaturationCurve::LinearUp,
-            SaturationCurve::LinearDown,
-            SaturationCurve::Extremes,
-            SaturationCurve::Midtones,
-            SaturationCurve::DarkSaturated,
-            SaturationCurve::LightSaturated,
-        ]
-    }
 }
 
-// ============================================================================
-// Hue Shift Curves
-// Maps luminosity (0.0 to 1.0) to hue shift strength multiplier
-// Controls where the hue shift effect is strongest
-// ============================================================================
-
-/// Curve types for hue shift strength
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum HueShiftCurve {
-    /// The original extremes-based shift (0 at middle, strong at extremes)
-    Extremes,
-    /// Uniform shift strength across all luminosities
-    Flat,
-    /// Linear increase from dark to light
-    LinearUp,
-    /// Linear decrease from dark to light
-    LinearDown,
-    /// More shift in shadows
-    Shadows,
-    /// More shift in highlights
-    Highlights,
-    /// More shift in midtones
-    Midtones,
+/// Cubic Bezier curve defined by 4 control points.
+/// p0 and p3 are typically 0.0 and 1.0 for a standard 0→1 curve.
+#[derive(Clone, Copy, Debug)]
+pub struct Bezier {
+    pub p0: f32,
+    pub p1: f32,
+    pub p2: f32,
+    pub p3: f32,
 }
 
-impl HueShiftCurve {
-    /// Get the hue shift strength multiplier for a given luminosity
-    /// - luminosity: 0.0 (black) to 1.0 (white)
-    /// Returns: multiplier for hue shift strength (0.0 to 1.0)
-    pub fn evaluate(&self, luminosity: f32) -> f32 {
-        match self {
-            HueShiftCurve::Extremes => {
-                // 0 at middle, 1 at extremes (original behavior)
-                (luminosity - 0.5).abs() * 2.0
-            }
-            
-            HueShiftCurve::Flat => {
-                // Uniform shift everywhere
-                1.0
-            }
-            
-            HueShiftCurve::LinearUp => {
-                // 0 at dark, 1 at light
-                luminosity
-            }
-            
-            HueShiftCurve::LinearDown => {
-                // 1 at dark, 0 at light
-                1.0 - luminosity
-            }
-            
-            HueShiftCurve::Shadows => {
-                // More shift in shadows, smooth falloff
-                (1.0 - luminosity).powf(0.5)
-            }
-            
-            HueShiftCurve::Highlights => {
-                // More shift in highlights, smooth falloff
-                luminosity.powf(0.5)
-            }
-            
-            HueShiftCurve::Midtones => {
-                // Peak at 0.5, falls off toward extremes
-                let centered = luminosity - 0.5;
-                1.0 - (centered.abs() * 2.0).powf(1.5)
-            }
+impl Default for Bezier {
+    fn default() -> Self {
+        Self {
+            p0: 0.0,
+            p1: 0.33,
+            p2: 0.66,
+            p3: 1.0,
         }
     }
-    
-    /// Get display name for UI
-    pub fn name(&self) -> &'static str {
+}
+
+impl Curve for Bezier {
+    fn sample(&self, t: f32) -> f32 {
+        let u = 1.0 - t;
+        let tt = t * t;
+        let uu = u * u;
+        let uuu = uu * u;
+        let ttt = tt * t;
+
+        uuu * self.p0 + 3.0 * uu * t * self.p1 + 3.0 * u * tt * self.p2 + ttt * self.p3
+    }
+}
+
+// =============================================================================
+// CurveType enum: Runtime-selectable curve variant
+// =============================================================================
+// 
+// We use an enum here because the UI needs to switch between curve types at
+// runtime. The enum implements `Curve` by delegating to the appropriate variant.
+// This gives us the best of both worlds:
+// - Static dispatch when the type is known
+// - Runtime selection via the enum
+
+/// All available curve types, selectable at runtime.
+/// Each variant stores its own parameters.
+#[derive(Clone, Copy, Debug)]
+pub enum CurveType {
+    Linear(Linear),
+    EaseIn(EaseIn),
+    EaseOut(EaseOut),
+    EaseInOut(EaseInOut),
+    Bezier(Bezier),
+}
+
+impl Default for CurveType {
+    fn default() -> Self {
+        CurveType::Linear(Linear::default())
+    }
+}
+
+impl Curve for CurveType {
+    fn sample(&self, t: f32) -> f32 {
         match self {
-            HueShiftCurve::Extremes => "Extremes (default)",
-            HueShiftCurve::Flat => "Flat (uniform)",
-            HueShiftCurve::LinearUp => "Linear ↑",
-            HueShiftCurve::LinearDown => "Linear ↓",
-            HueShiftCurve::Shadows => "Shadows",
-            HueShiftCurve::Highlights => "Highlights",
-            HueShiftCurve::Midtones => "Midtones",
+            CurveType::Linear(c) => c.sample(t),
+            CurveType::EaseIn(c) => c.sample(t),
+            CurveType::EaseOut(c) => c.sample(t),
+            CurveType::EaseInOut(c) => c.sample(t),
+            CurveType::Bezier(c) => c.sample(t),
         }
     }
-    
-    /// Get all curve types for iteration
-    pub fn all() -> &'static [HueShiftCurve] {
-        &[
-            HueShiftCurve::Extremes,
-            HueShiftCurve::Flat,
-            HueShiftCurve::LinearUp,
-            HueShiftCurve::LinearDown,
-            HueShiftCurve::Shadows,
-            HueShiftCurve::Highlights,
-            HueShiftCurve::Midtones,
-        ]
-    }
 }
 
-// ============================================================================
-// Plotting helper - generates points for visualizing a curve
-// ============================================================================
-
-/// Generate points for plotting a saturation curve
-/// Returns Vec of (x, y) where x is luminosity and y is the saturation to add
-pub fn plot_curve(curve: SaturationCurve, strength: f32, num_points: usize) -> Vec<(f32, f32)> {
-    (0..num_points)
-        .map(|i| {
-            let x = i as f32 / (num_points - 1) as f32;
-            let y = curve.evaluate(x, strength);
-            (x, y)
-        })
-        .collect()
+/// Helper enum for UI: identifies which curve type is selected without parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveKind {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Bezier,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_flat_curve() {
-        let curve = SaturationCurve::Flat;
-        // Flat curve returns 0.5 * strength * 0.15 = 0.075 at full strength
-        let result = curve.evaluate(0.5, 1.0);
-        assert!(result > 0.0 && result < 0.2);
+impl CurveType {
+    /// Returns the kind of this curve (for UI matching).
+    pub fn kind(&self) -> CurveKind {
+        match self {
+            CurveType::Linear(_) => CurveKind::Linear,
+            CurveType::EaseIn(_) => CurveKind::EaseIn,
+            CurveType::EaseOut(_) => CurveKind::EaseOut,
+            CurveType::EaseInOut(_) => CurveKind::EaseInOut,
+            CurveType::Bezier(_) => CurveKind::Bezier,
+        }
     }
-    
-    #[test]
-    fn test_strength_zero_gives_zero() {
-        for curve in SaturationCurve::all() {
-            // With strength 0, all curves should return 0.0 (no saturation added)
-            assert_eq!(curve.evaluate(0.5, 0.0), 0.0);
+
+    /// Creates a new CurveType of the given kind with default parameters.
+    pub fn from_kind(kind: CurveKind) -> Self {
+        match kind {
+            CurveKind::Linear => CurveType::Linear(Linear::default()),
+            CurveKind::EaseIn => CurveType::EaseIn(EaseIn::default()),
+            CurveKind::EaseOut => CurveType::EaseOut(EaseOut::default()),
+            CurveKind::EaseInOut => CurveType::EaseInOut(EaseInOut::default()),
+            CurveKind::Bezier => CurveType::Bezier(Bezier::default()),
         }
     }
 }
